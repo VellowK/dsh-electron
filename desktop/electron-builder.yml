@@ -1,0 +1,32 @@
+appId: com.deepseek.dsh-desktop
+productName: DeepSeek Harness Desktop
+directories:
+  buildResources: resources
+  output: release
+files:
+  - dist/**/*
+  - package.json
+# The harness runtime must live OUTSIDE the asar so the simple version-check
+# updater and the plugin manager can replace files in place at runtime.
+#
+# Copy from `resources` (the PARENT) rather than `resources/harness`: electron-builder's
+# file matcher hard-excludes any directory whose path relative to `from` is exactly
+# `node_modules`, which would drop the harness's entire runtime. Anchored at the
+# parent, its node_modules sits at `harness/node_modules` and is copied normally.
+asar: true
+extraResources:
+  - from: resources
+    to: .
+    filter:
+      - "harness/**/*"
+win:
+  icon: resources/icon.ico
+  target:
+    - target: nsis
+      arch:
+        - x64
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  shortcutName: DeepSeek Harness Desktop

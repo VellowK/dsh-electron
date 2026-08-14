@@ -1,0 +1,27 @@
+{
+  "name": "dsh-desktop",
+  "productName": "DeepSeek Harness Desktop",
+  "version": "0.1.0",
+  "description": "DeepSeek Harness desktop shell — Electron wrapper over the dsh web harness",
+  "main": "dist/main/index.js",
+  "author": "dsh-desktop",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "prepare:harness": "node scripts/prepare-harness.mjs",
+    "build:ts": "tsc -p tsconfig.json && node scripts/copy-ui.mjs",
+    "make:icon": "electron scripts/make-icon.mjs",
+    "dev": "node scripts/dev.mjs",
+    "verify:node": "electron scripts/verify-node.mjs",
+    "dist": "npm run build:ts && electron-builder --win",
+    "dist:dir": "npm run build:ts && electron-builder --win --dir"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "electron": "^43.4.0",
+    "electron-builder": "^26.0.0",
+    "typescript": "^5.9.0"
+  }
+}

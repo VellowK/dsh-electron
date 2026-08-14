@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'" />
+  <title>插件管理</title>
+  <link rel="stylesheet" href="plugin-manager.css" />
+</head>
+<body>
+  <header>
+    <h1>插件管理</h1>
+    <p class="subtitle">安装 / 卸载 / 更新 DeepSeek Harness 插件（变更后自动重启服务）</p>
+  </header>
+
+  <section class="search">
+    <input id="search-input" type="text" placeholder="搜索插件，例如 @deepseek-ai/dsh-" />
+    <button id="search-btn" type="button">搜索</button>
+  </section>
+  <div id="search-results" class="results" hidden></div>
+
+  <section class="installed">
+    <div class="section-head">
+      <h2>已安装</h2>
+      <button id="refresh-btn" type="button">刷新</button>
+    </div>
+    <ul id="installed-list" class="plugin-list"></ul>
+  </section>
+
+  <section class="log">
+    <div class="section-head"><h2>操作日志</h2></div>
+    <pre id="log-output"></pre>
+  </section>
+
+  <script src="plugin-manager.js"></script>
+</body>
+</html>
