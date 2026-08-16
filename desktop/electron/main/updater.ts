@@ -1,14 +1,13 @@
 /**
- * Simple version check updater. No silent auto-install: it compares the
- * bundled harness version against the npm "latest", surfaces a prompt, and only
- * on explicit confirmation swaps `@deepseek-ai/dsh` in place (mirroring
- * scripts/prepare-harness.mjs) and restarts the harness child.
- *
- * Versions compared: the *harness runtime* (`@deepseek-ai/dsh`), not the
- * Electron shell. The shell's own version is surfaced for context.
+ * Simple version check updater. No silent auto-install. It checks two things
+ * independently:
+ *   - the *harness runtime* (`@deepseek-ai/dsh`) against the npm "latest",
+ *     swapping it in place on explicit confirmation and restarting the child;
+ *   - the *Electron shell* against the newest GitHub release, pointing at the
+ *     download page (the NSIS-installed shell can't self-update).
  */
 
-import { BrowserWindow, dialog, ipcMain, Notification } from 'electron'
+import { BrowserWindow, dialog, ipcMain, Notification, shell } from 'electron'
 import { spawn, type ChildProcessByStdio } from 'node:child_process'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -29,7 +28,22 @@ export interface UpdateStatus {
   hasUpdate: boolean
 }
 
+/** Shell (Electron app) update status, sourced from GitHub releases. */
+export interface ShellUpdateStatus {
+  current: string
+  latest: string
+  hasUpdate: boolean
+  url: string | undefined
+}
+
 const PNPM_VERSION = 'pnpm@11.7.0'
+
+/** GitHub repo the shell is published to; shell updates come from its releases. */
+const SHELL_REPO = 'VellowK/dsh-electron'
+
+function githubApiBase(): string {
+  return (process.env.DSH_GITHUB_API ?? 'https://api.github.com').replace(/\/+$/, '')
+}
 
 function registryBase(): string {
   return (process.env.DSH_NPM_REGISTRY ?? 'https://registry.npmjs.org').replace(/\/+$/, '')
@@ -97,6 +111,42 @@ function compareVersions(a: string, b: string): number {
   return 0
 }
 
+/** Human-readable error message from any thrown value. */
+function errMsg(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
+/**
+ * Latest shell release from GitHub. All shell releases are plain `x.y.z` (no
+ * prerelease), so `/releases/latest` returns the newest one directly.
+ */
+async function fetchLatestShell(): Promise<{ version: string; url: string }> {
+  const url = `${githubApiBase()}/repos/${SHELL_REPO}/releases/latest`
+  const response = await fetch(url, {
+    headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'dsh-electron-updater' },
+  })
+  if (!response.ok) throw new Error(`GitHub API HTTP ${response.status}`)
+  const latest = (await response.json()) as { tag_name?: string; html_url?: string }
+  if (!latest || typeof latest.tag_name !== 'string' || latest.tag_name === '') {
+    throw new Error('GitHub returned no release')
+  }
+  return {
+    version: latest.tag_name.replace(/^v/, ''),
+    url: latest.html_url ?? `https://github.com/${SHELL_REPO}/releases`,
+  }
+}
+
+/** Compare the running shell version against the newest GitHub release. Never prompts. */
+export async function checkForShellUpdate(ctx: UpdaterContext): Promise<ShellUpdateStatus> {
+  const latest = await fetchLatestShell()
+  return {
+    current: ctx.shellVersion,
+    latest: latest.version,
+    hasUpdate: compareVersions(latest.version, ctx.shellVersion) > 0,
+    url: latest.url,
+  }
+}
+
 /** Fetch latest, compare against bundled, and report. Never prompts. */
 export async function checkForUpdate(ctx: UpdaterContext): Promise<UpdateStatus> {
   const current = bundledVersion(ctx)
@@ -145,93 +195,130 @@ export async function applyUpdate(ctx: UpdaterContext): Promise<string> {
   return version
 }
 
-/** Check, then prompt via a native dialog; on confirm apply + restart. */
+/** Check, then prompt via a native dialog; on confirm apply + restart (harness) or open the download page (shell). */
 export async function checkAndPrompt(ctx: UpdaterContext, window: BrowserWindow | undefined): Promise<void> {
-  let status: UpdateStatus
-  try {
-    status = await checkForUpdate(ctx)
-  } catch (error) {
+  const show = (options: Electron.MessageBoxOptions): Promise<Electron.MessageBoxReturnValue> =>
+    window && !window.isDestroyed() ? dialog.showMessageBox(window, options) : dialog.showMessageBox(options)
+
+  // Check shell (GitHub) and harness (npm) independently — one network failure
+  // shouldn't hide the other's result.
+  const [shellRes, harnessRes] = await Promise.allSettled([
+    checkForShellUpdate(ctx),
+    checkForUpdate(ctx),
+  ])
+  const shellStatus = shellRes.status === 'fulfilled' ? shellRes.value : undefined
+  const harnessStatus = harnessRes.status === 'fulfilled' ? harnessRes.value : undefined
+  const failures: string[] = []
+  if (shellRes.status === 'rejected') failures.push(`外壳：${errMsg(shellRes.reason)}`)
+  if (harnessRes.status === 'rejected') failures.push(`harness：${errMsg(harnessRes.reason)}`)
+
+  // Shell update first — it's the app itself, and it can't self-update, so
+  // point at the GitHub download page rather than an in-place install.
+  if (shellStatus?.hasUpdate) {
+    const options: Electron.MessageBoxOptions = {
+      type: 'info',
+      title: '发现新版本',
+      message: `外壳有新版本可用：v${shellStatus.latest}`,
+      detail: `当前 v${shellStatus.current} → 最新 v${shellStatus.latest}\n外壳通过安装包更新，请到 GitHub 下载新版安装包。`,
+      buttons: ['打开下载页', '稍后'],
+      defaultId: 0,
+      cancelId: 1,
+    }
+    const choice = await show(options)
+    if (choice.response === 0 && shellStatus.url) void shell.openExternal(shellStatus.url)
+    return
+  }
+
+  if (harnessStatus?.hasUpdate) {
+    const options: Electron.MessageBoxOptions = {
+      type: 'info',
+      title: '发现新版本',
+      message: `harness 有新版本可用：${harnessStatus.latest}`,
+      detail: `当前 ${harnessStatus.current ?? '未安装'} → 最新 ${harnessStatus.latest}\n（外壳 v${ctx.shellVersion}）`,
+      buttons: ['更新', '稍后'],
+      defaultId: 0,
+      cancelId: 1,
+    }
+    const choice = await show(options)
+    if (choice.response !== 0) return
+
+    try {
+      const version = await applyUpdate(ctx)
+      const done: Electron.MessageBoxOptions = {
+        type: 'info',
+        title: '更新完成',
+        message: `已更新到 harness ${version}`,
+        detail: 'harness 已重启。',
+      }
+      void show(done)
+    } catch (error) {
+      const failed: Electron.MessageBoxOptions = {
+        type: 'error',
+        title: '更新失败',
+        message: '更新 harness 失败',
+        detail: errMsg(error),
+        buttons: ['打开下载页', '关闭'],
+        defaultId: 1,
+        cancelId: 1,
+      }
+      const fallback = await show(failed)
+      if (fallback.response === 0) void shell.openExternal('https://www.npmjs.com/package/@deepseek-ai/dsh')
+    }
+    return
+  }
+
+  // Nothing newer. If BOTH checks failed there's no "latest" to trust, so
+  // report the failure; otherwise surface any partial failure as a note.
+  if (!shellStatus && !harnessStatus) {
     const options: Electron.MessageBoxOptions = {
       type: 'warning',
       title: '检查更新',
       message: '检查更新失败',
-      detail: error instanceof Error ? error.message : String(error),
+      detail: failures.join('\n'),
     }
-    if (window && !window.isDestroyed()) void dialog.showMessageBox(window, options)
-    else void dialog.showMessageBox(options)
+    void show(options)
     return
   }
 
-  if (!status.hasUpdate) {
-    const options: Electron.MessageBoxOptions = {
-      type: 'info',
-      title: '检查更新',
-      message: '已是最新版本',
-      detail: `harness ${status.current ?? '未安装'}（外壳 v${ctx.shellVersion}）`,
-    }
-    if (window && !window.isDestroyed()) void dialog.showMessageBox(window, options)
-    else void dialog.showMessageBox(options)
-    return
-  }
-
+  const note = failures.length > 0 ? `\n（部分检查失败：${failures.join('；')}）` : ''
   const options: Electron.MessageBoxOptions = {
     type: 'info',
-    title: '发现新版本',
-    message: `harness 有新版本可用：${status.latest}`,
-    detail: `当前 ${status.current ?? '未安装'} → 最新 ${status.latest}\n（外壳 v${ctx.shellVersion}）`,
-    buttons: ['更新', '稍后'],
-    defaultId: 0,
-    cancelId: 1,
+    title: '检查更新',
+    message: '已是最新版本',
+    detail: `外壳 v${ctx.shellVersion} · harness ${harnessStatus?.current ?? '未知'}${note}`,
   }
-  const choice = window && !window.isDestroyed() ? await dialog.showMessageBox(window, options) : await dialog.showMessageBox(options)
-  if (choice.response !== 0) return
-
-  try {
-    const version = await applyUpdate(ctx)
-    const done: Electron.MessageBoxOptions = {
-      type: 'info',
-      title: '更新完成',
-      message: `已更新到 harness ${version}`,
-      detail: 'harness 已重启。',
-    }
-    if (window && !window.isDestroyed()) void dialog.showMessageBox(window, done)
-    else void dialog.showMessageBox(done)
-  } catch (error) {
-    const failed: Electron.MessageBoxOptions = {
-      type: 'error',
-      title: '更新失败',
-      message: '更新 harness 失败',
-      detail: error instanceof Error ? error.message : String(error),
-      buttons: ['打开下载页', '关闭'],
-      defaultId: 1,
-      cancelId: 1,
-    }
-    const fallback = window && !window.isDestroyed() ? await dialog.showMessageBox(window, failed) : await dialog.showMessageBox(failed)
-    if (fallback.response === 0) {
-      void import('electron').then(({ shell }) => {
-        shell.openExternal('https://www.npmjs.com/package/@deepseek-ai/dsh')
-      })
-    }
-  }
+  void show(options)
 }
 
 /** Background startup check: non-blocking, surfaces a system notification only. */
 export function backgroundCheck(ctx: UpdaterContext): void {
+  const notify = (title: string, body: string, onClick: () => void): void => {
+    if (Notification.isSupported()) {
+      const n = new Notification({ title, body })
+      n.on('click', onClick)
+      n.show()
+    } else {
+      console.log(`[updater] ${title}: ${body}`)
+    }
+  }
+
+  checkForShellUpdate(ctx)
+    .then((status) => {
+      if (!status.hasUpdate) return
+      notify('外壳有新版本', `v${status.current} → v${status.latest}`, () => {
+        if (status.url) void shell.openExternal(status.url)
+      })
+    })
+    .catch((error) => console.log(`[updater] background shell check failed: ${errMsg(error)}`))
+
   checkForUpdate(ctx)
     .then((status) => {
       if (!status.hasUpdate) return
-      if (Notification.isSupported()) {
-        const n = new Notification({
-          title: 'harness 有新版本',
-          body: `${status.current ?? '?'} → ${status.latest}`,
-        })
-        n.on('click', () => { void checkAndPrompt(ctx, undefined) })
-        n.show()
-      } else {
-        console.log(`[updater] update available: ${status.current} → ${status.latest}`)
-      }
+      notify('harness 有新版本', `${status.current ?? '?'} → ${status.latest}`, () => {
+        void checkAndPrompt(ctx, undefined)
+      })
     })
-    .catch((error) => console.log(`[updater] background check failed: ${error instanceof Error ? error.message : error}`))
+    .catch((error) => console.log(`[updater] background check failed: ${errMsg(error)}`))
 }
 
 /** Register the update IPC surface and return a disposer. */
