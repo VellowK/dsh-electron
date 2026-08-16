@@ -34,12 +34,6 @@ execFileSync('node', [join(ROOT, 'node_modules', 'typescript', 'bin', 'tsc'), '-
   stdio: 'inherit',
 })
 
-// 2b. Copy static UI assets (plugin manager) into dist/ui/.
-execFileSync('node', [join(ROOT, 'scripts', 'copy-ui.mjs')], {
-  cwd: ROOT,
-  stdio: 'inherit',
-})
-
 // 3. Launch Electron. npm's electron bin is a Node script that resolves the
 //    real electron.exe and spawns it.
 log('launching Electron…')

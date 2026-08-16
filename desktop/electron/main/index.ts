@@ -8,7 +8,6 @@ import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { HarnessManager, type HarnessPaths } from './harness.js'
 import { registerFileUpload } from './files.js'
-import { registerPlugins } from './plugin.js'
 import { backgroundCheck, checkAndPrompt, registerUpdater, type UpdaterContext } from './updater.js'
 
 // CJS build (no "type": "module" in package.json) — `__dirname` is available.
@@ -33,33 +32,18 @@ function resolveHarnessPaths(): HarnessPaths {
 
 let mainWindow: BrowserWindow | undefined
 let manager: HarnessManager | undefined
-let pluginWindow: BrowserWindow | undefined
 let updater: UpdaterContext | undefined
 
-function openPluginManager(): void {
-  if (pluginWindow !== undefined && !pluginWindow.isDestroyed()) {
-    pluginWindow.focus()
-    return
-  }
-  pluginWindow = new BrowserWindow({
-    width: 720,
-    height: 680,
-    minWidth: 560,
-    minHeight: 480,
-    title: '插件管理',
-    backgroundColor: '#141414',
-    webPreferences: {
-      preload: join(__dirname, '..', 'preload', 'plugin.cjs'),
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: true,
-    },
-  })
-  pluginWindow.setMenuBarVisibility(false)
-  pluginWindow.on('closed', () => {
-    pluginWindow = undefined
-  })
-  void pluginWindow.loadFile(join(__dirname, '..', 'ui', 'plugin-manager.html'))
+/**
+ * Deep-link the main window to the harness's settings dialog on the plugin
+ * market section. The settings shell reads `#settings/<id>` (patched in
+ * applySettingsDeepLinkPatch), so setting the hash opens it without a reload.
+ */
+function openMarket(): void {
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  if (mainWindow.isMinimized()) mainWindow.restore()
+  mainWindow.focus()
+  void mainWindow.webContents.executeJavaScript('location.hash = "#settings/market"')
 }
 
 function createWindow(): void {
@@ -122,7 +106,6 @@ function buildMenu(): void {
     {
       label: '视图',
       submenu: [
-        { role: 'reload', label: '重新加载' },
         { role: 'forceReload', label: '强制重新加载' },
         { role: 'toggleDevTools', label: '开发者工具', visible: IS_DEV },
         { type: 'separator' },
@@ -137,8 +120,16 @@ function buildMenu(): void {
       label: '工具',
       submenu: [
         {
-          label: '插件管理',
-          click: () => openPluginManager(),
+          label: '插件市场',
+          click: () => openMarket(),
+        },
+        {
+          label: '重启服务',
+          click: () => {
+            if (manager) void manager.restart().catch((error) => {
+              console.error('[shell] restart failed:', error)
+            })
+          },
         },
         { type: 'separator' },
         {
@@ -194,6 +185,7 @@ function registerWindowControls(): void {
       menu.popup({ window: mainWindow })
     }
   })
+  ipcMain.on('app:reload', () => { mainWindow?.webContents.reload() })
   ipcMain.on('window:minimize', () => { mainWindow?.minimize() })
   ipcMain.on('window:maximize-toggle', () => {
     if (!mainWindow) return
@@ -241,14 +233,6 @@ function wireHarness(): void {
   registerFileUpload({
     workspace: paths.workspace,
     getUrl: () => manager?.getUrl(),
-  })
-
-  registerPlugins({
-    binPath: paths.binPath,
-    dshHome: paths.dshHome,
-    workspace: paths.workspace,
-    pnpmBinDir: paths.pnpmBinDir,
-    restart: () => manager?.restart() ?? Promise.reject(new Error('harness manager not ready')),
   })
 
   updater = {

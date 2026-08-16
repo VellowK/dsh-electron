@@ -10,6 +10,7 @@
 
 import { spawn, type ChildProcessByStdio } from 'node:child_process'
 import { existsSync } from 'node:fs'
+import { delimiter } from 'node:path'
 import { EventEmitter } from 'node:events'
 import type { Readable } from 'node:stream'
 import { applyHarnessPatches } from './patches.js'
@@ -78,6 +79,9 @@ export class HarnessManager extends EventEmitter {
         ELECTRON_RUN_AS_NODE: '1',
         DSH_HOME: this.paths.dshHome,
         DSH_TELEMETRY_DISABLED: '1',
+        // The bundled pnpm must be on PATH so in-host plugin installs (the
+        // dsh-market plugin) resolve it without a system pnpm.
+        PATH: `${this.paths.pnpmBinDir}${delimiter}${process.env.PATH ?? ''}`,
       },
       cwd: this.paths.workspace,
       stdio: ['ignore', 'pipe', 'pipe'],

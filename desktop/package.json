@@ -1,7 +1,7 @@
 {
   "name": "dsh-desktop",
   "productName": "DeepSeek Harness Desktop",
-  "version": "0.1.0",
+  "version": "0.1.0-dev.1",
   "description": "DeepSeek Harness desktop shell — Electron wrapper over the dsh web harness",
   "main": "dist/main/index.js",
   "author": "dsh-desktop",
@@ -11,12 +11,15 @@
   },
   "scripts": {
     "prepare:harness": "node scripts/prepare-harness.mjs",
-    "build:ts": "tsc -p tsconfig.json && node scripts/copy-ui.mjs",
+    "prune:harness": "node scripts/prune-harness.mjs",
+    "build:ts": "tsc -p tsconfig.json",
     "make:icon": "electron scripts/make-icon.mjs",
     "dev": "node scripts/dev.mjs",
     "verify:node": "electron scripts/verify-node.mjs",
-    "dist": "npm run build:ts && electron-builder --win",
-    "dist:dir": "npm run build:ts && electron-builder --win --dir"
+    "version:set": "node scripts/version.mjs",
+    "version:bump": "node scripts/version.mjs --bump",
+    "dist": "npm run build:ts && npm run prune:harness && electron-builder --win",
+    "dist:dir": "npm run build:ts && npm run prune:harness && electron-builder --win --dir"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
