@@ -1,7 +1,7 @@
 {
   "name": "dsh-desktop",
   "productName": "DeepSeek Harness Desktop",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "DeepSeek Harness desktop shell — Electron wrapper over the dsh web harness",
   "main": "dist/main/index.js",
   "author": "dsh-desktop",

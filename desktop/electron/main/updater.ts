@@ -7,7 +7,7 @@
  *     download page (the NSIS-installed shell can't self-update).
  */
 
-import { BrowserWindow, dialog, ipcMain, Notification, shell } from 'electron'
+import { BaseWindow, dialog, ipcMain, Notification, shell } from 'electron'
 import { spawn, type ChildProcessByStdio } from 'node:child_process'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -196,7 +196,7 @@ export async function applyUpdate(ctx: UpdaterContext): Promise<string> {
 }
 
 /** Check, then prompt via a native dialog; on confirm apply + restart (harness) or open the download page (shell). */
-export async function checkAndPrompt(ctx: UpdaterContext, window: BrowserWindow | undefined): Promise<void> {
+export async function checkAndPrompt(ctx: UpdaterContext, window: BaseWindow | undefined): Promise<void> {
   const show = (options: Electron.MessageBoxOptions): Promise<Electron.MessageBoxReturnValue> =>
     window && !window.isDestroyed() ? dialog.showMessageBox(window, options) : dialog.showMessageBox(options)
 

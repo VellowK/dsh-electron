@@ -1,11 +1,16 @@
 /**
- * Harness window preload — contextBridge surface + DOM shell for the dsh web UI.
+ * Harness view preload — contextBridge surface + upload affordances for the
+ * dsh web UI.
  *
  * Exposes:
  *   - `dshHarness`: harness lifecycle state (about/status affordances).
  *   - `dshUpload`: arbitrary-file upload (pick dialog + drag/drop). Images alone
  *     fall through to the harness's native attachment flow; any non-image file
  *     in a drop is claimed and routed through the workspace `uploads/` path.
+ *
+ * Window controls are NOT injected here — the shell uses the native window
+ * frame (title bar + min/max/close) and the native application menu bar, so
+ * plugin UI in the page's top-right corner never collides with them.
  */
 
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
@@ -22,6 +27,9 @@ export interface UploadResult {
 contextBridge.exposeInMainWorld('dshHarness', {
   /** Current harness state. */
   getState: (): Promise<HarnessState> => ipcRenderer.invoke('harness:getState'),
+
+  /** Whether the shell booted in safe mode (only the shipped plugins). */
+  getSafeMode: (): Promise<boolean> => ipcRenderer.invoke('harness:getSafeMode'),
 
   /** Subscribe to harness state changes; returns an unsubscribe fn. */
   onState: (cb: (state: HarnessState) => void): (() => void) => {
@@ -116,145 +124,42 @@ function interceptDrops(): void {
   }, true)
 }
 
-let closeReloadConfirm: (() => void) | undefined
-
-/**
- * Inline reload confirmation, popped below the ↻ button in the titlebar. The
- * app's native menus are out of the harness UI's control, so a system dialog
- * would clash with the frameless look; this keeps it in-page and styled like
- * the rest of the injected shell (dark, blurred, DeepSeek-blue primary).
- */
-function showReloadConfirm(anchor: HTMLButtonElement): void {
-  closeReloadConfirm?.()
-
-  const pop = document.createElement('div')
-  pop.className = 'dsh-reload-popover'
-  pop.style.cssText = [
-    'position:fixed', 'z-index:2147483647', 'min-width:236px', 'padding:12px 14px',
-    'border-radius:10px', 'background:rgba(30,30,30,0.96)', 'border:1px solid rgba(255,255,255,0.08)',
-    'color:#e8e8e8', 'font:13px/1.5 system-ui, sans-serif',
-    'box-shadow:0 8px 28px rgba(0,0,0,0.5)', 'backdrop-filter:blur(8px)',
-  ].join(';')
-
-  const msg = document.createElement('div')
-  msg.textContent = '确定要重新加载界面吗？'
-  msg.style.marginBottom = '4px'
-
-  const hint = document.createElement('div')
-  hint.textContent = '未发送的输入内容可能会丢失。'
-  hint.style.cssText = 'margin-bottom:12px;color:#9a9a9a;font-size:12px;'
-
-  const actions = document.createElement('div')
-  actions.style.cssText = 'display:flex;justify-content:flex-end;gap:8px;'
-
-  const mkBtn = (label: string, primary: boolean): HTMLButtonElement => {
-    const b = document.createElement('button')
-    b.textContent = label
-    b.style.cssText = [
-      'padding:5px 14px', 'border-radius:6px', 'border:1px solid transparent',
-      'font:13px system-ui, sans-serif', 'cursor:pointer', 'transition:filter 0.12s',
-      primary ? 'background:#4d6bfe;color:#fff' : 'background:rgba(255,255,255,0.08);color:#e8e8e8',
-    ].join(';')
-    b.addEventListener('mouseenter', () => { b.style.filter = 'brightness(1.15)' })
-    b.addEventListener('mouseleave', () => { b.style.filter = 'none' })
-    return b
-  }
-
-  const cancelBtn = mkBtn('取消', false)
-  const confirmBtn = mkBtn('重新加载', true)
-
-  const onDocDown = (event: MouseEvent): void => {
-    if (!pop.contains(event.target as Node)) close()
-  }
-  const onKeyDown = (event: KeyboardEvent): void => {
-    if (event.key === 'Escape') close()
-  }
-  const close = (): void => {
-    document.removeEventListener('mousedown', onDocDown)
-    window.removeEventListener('keydown', onKeyDown)
-    pop.remove()
-    closeReloadConfirm = undefined
-  }
-  closeReloadConfirm = close
-
-  cancelBtn.addEventListener('click', close)
-  confirmBtn.addEventListener('click', () => {
-    close()
-    ipcRenderer.send('app:reload')
-  })
-
-  actions.append(cancelBtn, confirmBtn)
-  pop.append(msg, hint, actions)
-  document.body.appendChild(pop)
-
-  const r = anchor.getBoundingClientRect()
-  pop.style.top = `${r.bottom + 6}px`
-  pop.style.right = `${window.innerWidth - r.right}px`
-
-  // Defer so the click that opened it doesn't immediately dismiss it.
-  setTimeout(() => {
-    document.addEventListener('mousedown', onDocDown)
-    window.addEventListener('keydown', onKeyDown)
-  }, 0)
-}
-
-function injectTitlebar(): void {
-  const bar = document.createElement('div')
-  bar.style.cssText = [
-    'position:fixed', 'top:0', 'left:0', 'right:0', 'height:26px',
-    'display:flex', 'align-items:stretch', 'justify-content:flex-end',
-    'z-index:2147483630', '-webkit-app-region:drag', 'user-select:none',
-    'background:transparent',
-  ].join(';')
-
-  const mk = (label: string, title: string, onClick: () => void, danger = false): HTMLButtonElement => {
-    const b = document.createElement('button')
-    b.textContent = label
-    b.title = title
-    b.setAttribute('aria-label', title)
-    b.style.cssText = [
-      '-webkit-app-region:no-drag', 'width:42px', 'height:100%', 'border:none',
-      'background:transparent', 'color:#c8c8c8', 'font-size:13px', 'line-height:1',
-      'cursor:pointer', 'padding:0', 'display:inline-flex', 'align-items:center',
-      'justify-content:center', 'font-family:system-ui,sans-serif',
-    ].join(';')
-    b.addEventListener('mouseenter', () => {
-      b.style.background = danger ? '#e81123' : 'rgba(255,255,255,0.12)'
-      b.style.color = '#fff'
-    })
-    b.addEventListener('mouseleave', () => {
-      b.style.background = 'transparent'
-      b.style.color = '#c8c8c8'
-    })
-    b.addEventListener('click', onClick)
-    return b
-  }
-
-  const reloadBtn = mk('↻', '重新加载', () => {
-    if (closeReloadConfirm) closeReloadConfirm()
-    else showReloadConfirm(reloadBtn)
-  })
-  const menuBtn = mk('☰', '菜单', () => ipcRenderer.send('app:menu-popup'))
-  const minBtn = mk('─', '最小化', () => ipcRenderer.send('window:minimize'))
-  const maxBtn = mk('▢', '最大化', () => ipcRenderer.send('window:maximize-toggle'))
-  const closeBtn = mk('✕', '关闭', () => ipcRenderer.send('window:close'), true)
-
-  ipcRenderer.on('window:maximized', (_event, maximized: boolean) => {
-    maxBtn.textContent = maximized ? '❐' : '▢'
-    maxBtn.title = maximized ? '还原' : '最大化'
-  })
-
-  bar.append(reloadBtn, menuBtn, minBtn, maxBtn, closeBtn)
-  document.body.appendChild(bar)
-}
-
 function onReady(fn: () => void): void {
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', fn)
   else fn()
 }
 
+// ---- Safe-mode banner: a bottom fade-to-black with a hint line ----
+
+/** Inject the "以安全模式启动" gradient footer. Idempotent. */
+function showSafeModeBanner(): void {
+  if (document.getElementById('dsh-safe-mode-banner') !== null) return
+  const banner = document.createElement('div')
+  banner.id = 'dsh-safe-mode-banner'
+  banner.style.cssText = [
+    'position:fixed', 'left:0', 'right:0', 'bottom:0', 'height:120px',
+    'z-index:2147483000', 'pointer-events:none', 'box-sizing:border-box',
+    'background:linear-gradient(to top, rgba(0,0,0,0.92), rgba(0,0,0,0))',
+    'display:flex', 'align-items:flex-end', 'justify-content:center',
+    'padding-bottom:14px',
+  ].join(';')
+  const text = document.createElement('div')
+  text.textContent = '以安全模式启动'
+  text.style.cssText = [
+    'color:#fff', 'font:13px/1.4 system-ui, sans-serif', 'letter-spacing:0.5px',
+    'opacity:0.9', 'text-shadow:0 1px 4px rgba(0,0,0,0.8)',
+  ].join(';')
+  banner.appendChild(text)
+  document.body.appendChild(banner)
+}
+
 onReady(() => {
-  injectTitlebar()
   injectUploadButton()
   interceptDrops()
+  // Ask the shell whether this session is in safe mode; when it is, draw the
+  // footer hint. Querying on load avoids any IPC race with the banner state.
+  void (window as unknown as { dshHarness: { getSafeMode: () => Promise<boolean> } })
+    .dshHarness.getSafeMode().then((active) => {
+      if (active) showSafeModeBanner()
+    })
 })

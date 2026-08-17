@@ -3,11 +3,12 @@
  * HarnessManager that owns the dsh web server child process.
  */
 
-import { app, BrowserWindow, dialog, Menu, shell, ipcMain } from 'electron'
+import { app, BaseWindow, dialog, Menu, shell, ipcMain, WebContentsView } from 'electron'
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { HarnessManager, type HarnessPaths } from './harness.js'
 import { registerFileUpload } from './files.js'
+import { createTitlebar, TITLEBAR_HEIGHT } from './titlebar.js'
 import { backgroundCheck, checkAndPrompt, registerUpdater, type UpdaterContext } from './updater.js'
 
 // CJS build (no "type": "module" in package.json) — `__dirname` is available.
@@ -30,12 +31,20 @@ function resolveHarnessPaths(): HarnessPaths {
   return { binPath, dshHome, workspace, pnpmBinDir, harnessRoot }
 }
 
-let mainWindow: BrowserWindow | undefined
+let mainWindow: BaseWindow | undefined
+let harnessView: WebContentsView | undefined
+let titlebarView: WebContentsView | undefined
+let appMenu: Menu | undefined
 let manager: HarnessManager | undefined
 let updater: UpdaterContext | undefined
 
+/** Whether the current session is running in safe mode (only shipped plugins). */
+let safeMode = false
+/** Guards the startup-failure dialog so only one is ever shown at a time. */
+let startupErrorDialogOpen = false
+
 /**
- * Deep-link the main window to the harness's settings dialog on the plugin
+ * Deep-link the harness view to the harness's settings dialog on the plugin
  * market section. The settings shell reads `#settings/<id>` (patched in
  * applySettingsDeepLinkPatch), so setting the hash opens it without a reload.
  */
@@ -43,22 +52,50 @@ function openMarket(): void {
   if (!mainWindow || mainWindow.isDestroyed()) return
   if (mainWindow.isMinimized()) mainWindow.restore()
   mainWindow.focus()
-  void mainWindow.webContents.executeJavaScript('location.hash = "#settings/market"')
+  void harnessView?.webContents.executeJavaScript('location.hash = "#settings/market"')
+}
+
+/**
+ * Restart the harness in (or out of) safe mode. Safe mode mounts only the
+ * shipped web template (`@deepseek-ai/dsh-base` + `@deepseek-ai/dsh-web-app` +
+ * bundled `dshmarket`), so a broken user-installed plugin cannot stop the app
+ * from booting. The plugin inventory / market stay fully functional — the user
+ * can still add or remove plugins here and reboot normally once the culprit is
+ * gone. The menu is rebuilt so its "以安全模式启动" checkbox tracks the state.
+ */
+function setSafeMode(enabled: boolean): void {
+  safeMode = enabled
+  manager?.setSafeMode(enabled)
+  void manager?.restart().catch((error) => {
+    console.error('[harness] safe-mode restart failed:', error)
+  })
+  buildMenu()
+}
+
+/** Fill the window with the titlebar strip on top and the harness view below. */
+function layoutContent(): void {
+  if (!mainWindow || !harnessView || !titlebarView) return
+  const [width, height] = mainWindow.getContentSize()
+  titlebarView.setBounds({ x: 0, y: 0, width, height: TITLEBAR_HEIGHT })
+  harnessView.setBounds({ x: 0, y: TITLEBAR_HEIGHT, width, height: height - TITLEBAR_HEIGHT })
 }
 
 function createWindow(): void {
-  mainWindow = new BrowserWindow({
+  mainWindow = new BaseWindow({
     width: 1280,
     height: 860,
     minWidth: 900,
     minHeight: 600,
     title: 'DeepSeek Harness Desktop',
     backgroundColor: '#1a1a1a',
-    // Frameless: no OS title bar / menu bar. The harness UI is full-bleed; the
-    // preload injects a slim drag strip + window controls (min/max/close) and a
-    // menu button that pops the application menu.
+    // Frameless: the app draws its own titlebar strip (menu button + refresh +
+    // min/fullscreen/close) above the harness view, so window chrome never
+    // overlaps plugin UI rendered in the page's top-right corner.
     frame: false,
     ...(IS_DEV ? { icon: join(__dirname, '..', '..', 'resources', 'icon.ico') } : {}),
+  })
+
+  harnessView = new WebContentsView({
     webPreferences: {
       preload: join(__dirname, '..', 'preload', 'harness.cjs'),
       contextIsolation: true,
@@ -66,35 +103,41 @@ function createWindow(): void {
       sandbox: true,
     },
   })
+  mainWindow.contentView.addChildView(harnessView)
+
+  titlebarView = createTitlebar(mainWindow)
+
+  layoutContent()
+  mainWindow.on('resize', layoutContent)
+
+  const contents = harnessView.webContents
 
   // Keep the app pinned to the harness UI — never leave to external pages.
-  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+  contents.setWindowOpenHandler(({ url }) => {
     if (url.startsWith('http://127.0.0.1') || url.startsWith('http://localhost')) {
       return { action: 'allow' }
     }
     void shell.openExternal(url)
     return { action: 'deny' }
   })
-  mainWindow.webContents.on('will-navigate', (event, url) => {
+  contents.on('will-navigate', (event, url) => {
     const allowed = url.startsWith('http://127.0.0.1') || url.startsWith('http://localhost')
     if (!allowed) event.preventDefault()
   })
 
-  // Keep the injected maximize/restore button in sync.
-  mainWindow.on('maximize', () => mainWindow?.webContents.send('window:maximized', true))
-  mainWindow.on('unmaximize', () => mainWindow?.webContents.send('window:maximized', false))
-
   mainWindow.on('closed', () => {
     mainWindow = undefined
+    harnessView = undefined
+    titlebarView = undefined
   })
 
-  mainWindow.webContents.on('did-finish-load', () => {
+  contents.on('did-finish-load', () => {
     console.log('[shell] main window finished loading')
   })
-  mainWindow.webContents.on('did-fail-load', (_event, code, description, url) => {
+  contents.on('did-fail-load', (_event, code, description, url) => {
     console.error(`[shell] main window failed to load (${code}) ${description} — ${url}`)
   })
-  mainWindow.webContents.on('console-message', (details) => {
+  contents.on('console-message', (details) => {
     if (details.level === 'error' || details.level === 'warning') {
       console.log(`[renderer:${details.level}] ${details.message}`)
     }
@@ -130,6 +173,14 @@ function buildMenu(): void {
               console.error('[shell] restart failed:', error)
             })
           },
+        },
+        {
+          label: '以安全模式启动',
+          type: 'checkbox',
+          checked: safeMode,
+          // Electron auto-toggles the checkbox before `click` fires, so
+          // `menuItem.checked` is the new target state.
+          click: (menuItem) => setSafeMode(menuItem.checked),
         },
         { type: 'separator' },
         {
@@ -175,24 +226,8 @@ function buildMenu(): void {
       ],
     },
   ])
+  appMenu = menu
   Menu.setApplicationMenu(menu)
-}
-
-function registerWindowControls(): void {
-  ipcMain.on('app:menu-popup', () => {
-    const menu = Menu.getApplicationMenu()
-    if (menu && mainWindow && !mainWindow.isDestroyed()) {
-      menu.popup({ window: mainWindow })
-    }
-  })
-  ipcMain.on('app:reload', () => { mainWindow?.webContents.reload() })
-  ipcMain.on('window:minimize', () => { mainWindow?.minimize() })
-  ipcMain.on('window:maximize-toggle', () => {
-    if (!mainWindow) return
-    if (mainWindow.isMaximized()) mainWindow.unmaximize()
-    else mainWindow.maximize()
-  })
-  ipcMain.on('window:close', () => { mainWindow?.close() })
 }
 
 function wireHarness(): void {
@@ -200,35 +235,78 @@ function wireHarness(): void {
   manager = new HarnessManager(paths)
 
   manager.on('ready', (url) => {
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      void mainWindow.loadURL(url)
-      mainWindow.setTitle(`DeepSeek Harness Desktop — ${url.replace('http://', '')}`)
+    if (harnessView && !mainWindow?.isDestroyed()) {
+      void harnessView.webContents.loadURL(url)
+      mainWindow?.setTitle(`DeepSeek Harness Desktop — ${url.replace('http://', '')}`)
     }
   })
   manager.on('state', (state) => {
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('harness:state', state)
+    if (harnessView && !mainWindow?.isDestroyed()) {
+      harnessView.webContents.send('harness:state', state)
     }
   })
   manager.on('error', (error) => {
     console.error('[harness] error:', error)
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      void dialog.showMessageBox(mainWindow, {
-        type: 'error',
-        title: 'Harness 启动失败',
-        message: String((error as Error).message ?? error),
-      })
+    // Only one startup-failure dialog at a time — the restart loop can fire
+    // `error` repeatedly (spawn errors + 120s timeouts), and each used to stack
+    // a new modal. The guard turns that into a single dialog with a recovery
+    // path (safe mode / retry) instead of an unbounded pile of popups.
+    if (startupErrorDialogOpen) return
+    if (!mainWindow || mainWindow.isDestroyed()) return
+    startupErrorDialogOpen = true
+    const options: Electron.MessageBoxOptions = {
+      type: 'error',
+      title: 'Harness 启动失败',
+      message: String((error as Error).message ?? error),
+      detail: '启动超时或插件加载失败。可以安全模式启动（仅加载预置插件），或重试。',
+      buttons: ['无插件启动模式', '重试', '退出'],
+      defaultId: 0,
+      cancelId: 1,
     }
+    void dialog.showMessageBox(mainWindow, options).then(({ response }) => {
+      if (response === 0) {
+        setSafeMode(true)
+      } else if (response === 1) {
+        void manager?.restart().catch((err) => {
+          console.error('[harness] retry restart failed:', err)
+        })
+      } else {
+        app.quit()
+      }
+    }).finally(() => {
+      startupErrorDialogOpen = false
+    })
   })
   manager.on('log', (_stream, line) => {
     console.log(`[harness] ${line}`)
   })
 
   ipcMain.handle('harness:getState', () => manager?.getState() ?? 'stopped')
+  ipcMain.handle('harness:getSafeMode', () => safeMode)
   ipcMain.handle('harness:restart', () => manager?.restart().catch((error) => {
     console.error('[harness] restart failed:', error)
     throw error
   }))
+
+  // Titlebar window controls. The menu button pops the application menu at its
+  // own position (the titlebar sits at the window origin, so its client coords
+  // map 1:1 to window coords); the rest drive the frameless window directly.
+  ipcMain.on('titlebar:menu', (_event, pos: { x: number; y: number }) => {
+    if (!mainWindow || mainWindow.isDestroyed() || !appMenu) return
+    appMenu.popup({ window: mainWindow, x: Math.round(pos?.x ?? 0), y: Math.round(pos?.y ?? TITLEBAR_HEIGHT) })
+  })
+  ipcMain.on('titlebar:refresh', () => {
+    if (harnessView && !harnessView.webContents.isDestroyed()) harnessView.webContents.reload()
+  })
+  ipcMain.on('titlebar:minimize', () => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.minimize()
+  })
+  ipcMain.on('titlebar:toggleFullscreen', () => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.setFullScreen(!mainWindow.isFullScreen())
+  })
+  ipcMain.on('titlebar:close', () => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.close()
+  })
 
   registerFileUpload({
     workspace: paths.workspace,
@@ -267,13 +345,12 @@ if (!gotLock) {
 
   app.whenReady().then(() => {
     buildMenu()
-    registerWindowControls()
     createWindow()
     wireHarness()
 
     app.on('activate', () => {
       // macOS re-create window on dock click.
-      if (BrowserWindow.getAllWindows().length === 0) createWindow()
+      if (BaseWindow.getAllWindows().length === 0) createWindow()
     })
   })
 

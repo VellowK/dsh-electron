@@ -244,10 +244,47 @@ function applySettingsDeepLinkPatch(harnessRoot: string): void {
   console.log('[patches] settings shell → #settings/<id> deep-link listener')
 }
 
+/**
+ * Safe mode ("无插件启动模式"): when the shell boots with `DSH_SAFE_MODE=1`,
+ * mount only the shipped web template (`@deepseek-ai/dsh-base` +
+ * `@deepseek-ai/dsh-web-app` + the bundled `dshmarket`), skipping every
+ * user-installed bundle. This is a boot-time filter on the bundle list only —
+ * the profile manifest (and therefore the plugin inventory / market, which the
+ * user can still use to add or remove plugins) is left untouched, so recovery
+ * never rewrites the user's plugin set.
+ */
+function applySafeModePatch(harnessRoot: string): void {
+  const target = join(
+    harnessRoot, 'node_modules', '@deepseek-ai', 'dsh-app-boot', 'lib', 'index.js',
+  )
+  if (!existsSync(target)) {
+    console.warn('[patches] app-boot bundle missing — skipping safe-mode patch')
+    return
+  }
+  let src = readFileSync(target, 'utf8')
+  if (src.includes('DSH_SAFE_MODE')) return // already patched
+
+  // The compiled loadProfile resolves every `dsh.profile.bundles` entry to a
+  // patch layer; short-circuit it to the shipped web template when safe mode is
+  // on. The string is the whole expression, so surrounding indentation survives.
+  const needle = 'const layers = (normalizeShippedProfile(name, dir, readProfileManifest(binName, dir)).dsh?.profile?.bundles ?? []).map((packageName) => {'
+  if (!src.includes(needle)) {
+    console.warn('[patches] safe-mode bundle-list anchor not found — harness layout changed?')
+    return
+  }
+  src = src.replace(
+    needle,
+    'const layers = (process.env.DSH_SAFE_MODE === "1" ? ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app", "dshmarket"] : (normalizeShippedProfile(name, dir, readProfileManifest(binName, dir)).dsh?.profile?.bundles ?? [])).map((packageName) => {',
+  )
+  writeFileSync(target, src)
+  console.log('[patches] app-boot → DSH_SAFE_MODE bundle filter (safe mode)')
+}
+
 export function applyHarnessPatches(harnessRoot: string): void {
   applyOpenerPatch(harnessRoot)
   applyDirectoryPickerPatch(harnessRoot)
   applyMarketBundlePatch(harnessRoot)
   applyMarketClosurePatch(harnessRoot)
   applySettingsDeepLinkPatch(harnessRoot)
+  applySafeModePatch(harnessRoot)
 }

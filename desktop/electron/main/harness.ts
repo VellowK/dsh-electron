@@ -43,9 +43,17 @@ export class HarnessManager extends EventEmitter {
   private readyUrl: string | undefined
   private restartDelayMs = 1_000
   private restartTimer: ReturnType<typeof setTimeout> | undefined
+  /** Settles a pending `start()` readiness wait (clears its timeout + rejects). */
+  private settleStart: { cleanup: () => void; reject: (error: Error) => void } | undefined
+  private safeMode = false
 
   constructor(readonly paths: HarnessPaths) {
     super()
+  }
+
+  /** Whether the next spawn boots only the shipped plugins (safe mode). */
+  setSafeMode(enabled: boolean): void {
+    this.safeMode = enabled
   }
 
   getState(): HarnessState {
@@ -79,6 +87,9 @@ export class HarnessManager extends EventEmitter {
         ELECTRON_RUN_AS_NODE: '1',
         DSH_HOME: this.paths.dshHome,
         DSH_TELEMETRY_DISABLED: '1',
+        // Safe mode boots only the shipped web template (patched into
+        // dsh-app-boot); user-installed bundles are skipped.
+        DSH_SAFE_MODE: this.safeMode ? '1' : '0',
         // The bundled pnpm must be on PATH so in-host plugin installs (the
         // dsh-market plugin) resolve it without a system pnpm.
         PATH: `${this.paths.pnpmBinDir}${delimiter}${process.env.PATH ?? ''}`,
@@ -96,11 +107,21 @@ export class HarnessManager extends EventEmitter {
 
     child.on('error', (error) => {
       this.emit('log', 'stderr', `harness spawn error: ${error.message}`)
+      // The child never spawned — drop the stale handle so a later restart (or
+      // `stop()`) does not try to kill a process that does not exist.
+      this.child = undefined
       this.emit('error', error)
     })
     child.on('exit', (code, signal) => {
       this.emit('log', 'stderr', `harness exited (code=${code ?? 'null'} signal=${signal ?? 'null'})`)
       const wasRunning = this.state === 'running' || this.state === 'starting'
+      // Settle any pending readiness wait so its timeout cannot fire after the
+      // child is gone (which would emit a spurious "did not become ready").
+      if (this.settleStart !== undefined) {
+        const { cleanup, reject } = this.settleStart
+        cleanup()
+        reject(new Error(`harness exited before ready (code=${code ?? 'null'} signal=${signal ?? 'null'})`))
+      }
       this.child = undefined
       this.readyUrl = undefined
       this.set('stopped')
@@ -108,6 +129,7 @@ export class HarnessManager extends EventEmitter {
     })
 
     return new Promise<string>((resolve, reject) => {
+      let timeout: ReturnType<typeof setTimeout> | undefined
       const onReady = (url: string): void => {
         cleanup()
         resolve(url)
@@ -119,11 +141,18 @@ export class HarnessManager extends EventEmitter {
       const cleanup = (): void => {
         this.off('ready', onReady)
         this.off('error', onError)
-        clearTimeout(timeout)
+        if (timeout !== undefined) clearTimeout(timeout)
+        if (this.settleStart === settle) this.settleStart = undefined
       }
-      const timeout = setTimeout(() => {
+      const settle = { cleanup, reject }
+      this.settleStart = settle
+      timeout = setTimeout(() => {
         cleanup()
-        reject(new Error(`harness did not become ready within 120s`))
+        const error = new Error(`harness did not become ready within 120s`)
+        // Surface the timeout through the same 'error' channel as a spawn
+        // failure, so the shell shows its (single) startup-failure dialog.
+        this.emit('error', error)
+        reject(error)
       }, 120_000)
       this.once('ready', onReady)
       this.once('error', onError)
@@ -146,6 +175,14 @@ export class HarnessManager extends EventEmitter {
 
   /** Stop the harness. Tries graceful, falls back to force after the grace window. */
   async stop(): Promise<void> {
+    // Settle any in-flight readiness wait (and clear its timeout) so a
+    // stop/restart while a spawn is still "starting" cannot fire a spurious
+    // timeout error afterwards.
+    if (this.settleStart !== undefined) {
+      const { cleanup, reject } = this.settleStart
+      cleanup()
+      reject(new Error('harness stop requested before ready'))
+    }
     if (this.child === undefined) {
       this.stopping = true
       return
@@ -186,7 +223,10 @@ export class HarnessManager extends EventEmitter {
     this.emit('log', 'stderr', `harness will restart in ${Math.round(delay / 1000)}s`)
     this.restartTimer = setTimeout(() => {
       this.restartTimer = undefined
-      this.start().catch((error) => this.emit('error', error))
+      // The failure already surfaced through the 'error' channel (spawn error
+      // or the 120s timeout in `start()`), so just log here instead of
+      // re-emitting — that re-emission is what stacked the error dialog.
+      this.start().catch((error) => this.emit('log', 'stderr', `harness restart failed: ${error instanceof Error ? error.message : String(error)}`))
     }, delay)
   }
 

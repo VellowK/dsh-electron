@@ -17,7 +17,7 @@ const HARNESS_DIR = join(ROOT, 'resources', 'harness')
 
 // The pinned harness core. Bump here to roll the bundled harness forward; the
 // updater compares this against the npm "latest" at runtime.
-const DEFAULT_DSH_VERSION = '@deepseek-ai/dsh@0.1.0-rc.6'
+const DEFAULT_DSH_VERSION = '@deepseek-ai/dsh@0.1.0-rc.7'
 const PNPM_VERSION = 'pnpm@11.7.0'
 // The visual plugin market, bundled in-box (offline) as the app's plugin
 // manager. It declares `dsh.bundle`, so patching PROFILE_TEMPLATES.web in
