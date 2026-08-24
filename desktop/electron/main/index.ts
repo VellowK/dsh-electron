@@ -86,7 +86,7 @@ function createWindow(): void {
     height: 860,
     minWidth: 900,
     minHeight: 600,
-    title: 'DeepSeek Harness Desktop',
+    title: '',
     backgroundColor: '#1a1a1a',
     // Frameless: the app draws its own titlebar strip (menu button + refresh +
     // min/fullscreen/close) above the harness view, so window chrome never
@@ -149,7 +149,14 @@ function buildMenu(): void {
     {
       label: '视图',
       submenu: [
-        { role: 'forceReload', label: '强制重新加载' },
+        {
+          label: '强制重新加载',
+          click: () => {
+            if (harnessView && !harnessView.webContents.isDestroyed()) {
+              harnessView.webContents.reloadIgnoringCache()
+            }
+          },
+        },
         { role: 'toggleDevTools', label: '开发者工具', visible: IS_DEV },
         { type: 'separator' },
         { role: 'resetZoom', label: '实际大小' },
@@ -237,7 +244,7 @@ function wireHarness(): void {
   manager.on('ready', (url) => {
     if (harnessView && !mainWindow?.isDestroyed()) {
       void harnessView.webContents.loadURL(url)
-      mainWindow?.setTitle(`DeepSeek Harness Desktop — ${url.replace('http://', '')}`)
+      mainWindow?.setTitle('')
     }
   })
   manager.on('state', (state) => {
@@ -316,7 +323,9 @@ function wireHarness(): void {
   updater = {
     harnessRoot: paths.harnessRoot,
     shellVersion: app.getVersion(),
-    restart: () => manager?.restart() ?? Promise.reject(new Error('harness manager not ready')),
+    getWindow: () => mainWindow,
+    stop: () => manager?.stop() ?? Promise.reject(new Error('harness manager not ready')),
+    restart: () => manager?.start() ?? Promise.reject(new Error('harness manager not ready')),
   }
   registerUpdater(updater)
   // Non-blocking startup check; a system notification (not a modal) is shown

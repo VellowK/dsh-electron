@@ -9,7 +9,7 @@
 
 import { BaseWindow, dialog, ipcMain, Notification, shell } from 'electron'
 import { spawn, type ChildProcessByStdio } from 'node:child_process'
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Readable } from 'node:stream'
 
@@ -18,6 +18,10 @@ export interface UpdaterContext {
   harnessRoot: string
   /** The Electron shell version (`app.getVersion()`), for display only. */
   shellVersion: string
+  /** Return the current main window so notifications can focus it. */
+  getWindow?: () => BaseWindow | undefined
+  /** Stop the harness before replacing its runtime files. */
+  stop: () => Promise<void>
   /** Restart the harness child after an update; resolves to the new URL. */
   restart: () => Promise<string>
 }
@@ -36,7 +40,7 @@ export interface ShellUpdateStatus {
   url: string | undefined
 }
 
-const PNPM_VERSION = 'pnpm@11.7.0'
+const PNPM_VERSION = '11.7.0'
 
 /** GitHub repo the shell is published to; shell updates come from its releases. */
 const SHELL_REPO = 'VellowK/dsh-electron'
@@ -155,55 +159,127 @@ export async function checkForUpdate(ctx: UpdaterContext): Promise<UpdateStatus>
   return { current, latest, hasUpdate }
 }
 
-/** Run `npm install` to move the harness to `@latest` in place. Resolves to the new version. */
-function runNpmUpdate(ctx: UpdaterContext): Promise<string> {
+const UPDATE_TIMEOUT_MS = 10 * 60 * 1000
+let updateInProgress = false
+
+/** Run the bundled pnpm in a temporary runtime, then replace node_modules. */
+function runBundledPnpmUpdate(ctx: UpdaterContext): Promise<string> {
+  const packageManager = join(ctx.harnessRoot, 'node_modules', 'pnpm', 'bin', 'pnpm.mjs')
+  if (!existsSync(packageManager)) throw new Error(`bundled pnpm not found: ${packageManager}`)
+
+  const stagingRoot = mkdtempSync(join(ctx.harnessRoot, '.update-'))
+  const stagingModules = join(stagingRoot, 'node_modules')
+  mkdirSync(stagingModules, { recursive: true })
+  writeFileSync(join(stagingRoot, 'package.json'), JSON.stringify({
+    name: 'dsh-harness-runtime',
+    private: true,
+    dependencies: {
+      '@deepseek-ai/dsh': 'latest',
+      dshmarket: '1.10.0',
+      pnpm: PNPM_VERSION,
+    },
+    allowScripts: {
+      'koffi@3.1.5': true,
+      'node-pty@1.2.0-beta.15': true,
+      '@deepseek-ai/dsh-subprocess-local@0.1.0-rc.7': true,
+    },
+  }, null, 2) + '\n')
+
   return new Promise((resolve, reject) => {
-    const argv = ['install', '--no-audit', '--no-fund', '--no-save', '@deepseek-ai/dsh@latest', PNPM_VERSION]
-    if (process.env.DSH_NPM_REGISTRY) argv.push('--registry', process.env.DSH_NPM_REGISTRY)
-    // Build one command string (mirrors prepare-harness.mjs) so `npm` resolves
-    // through cmd.exe as npm.cmd on Windows, without shell-arg concatenation.
-    const command = ['npm', ...argv.map((a) => (/\s/.test(a) ? `"${a}"` : a))].join(' ')
-    const child: ChildProcessByStdio<null, Readable, Readable> = spawn(command, {
-      cwd: ctx.harnessRoot,
+    const args = [packageManager, 'install', '--no-lockfile']
+    if (process.env.DSH_NPM_REGISTRY) args.push('--registry', process.env.DSH_NPM_REGISTRY)
+    const child: ChildProcessByStdio<null, Readable, Readable> = spawn(process.execPath, args, {
+      cwd: stagingRoot,
+      env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
       stdio: ['ignore', 'pipe', 'pipe'],
-      shell: process.platform === 'win32',
       windowsHide: true,
     })
     let output = ''
+    let settled = false
+    const timer = setTimeout(() => {
+      if (settled) return
+      settled = true
+      child.kill()
+      reject(new Error(`pnpm update timed out after ${UPDATE_TIMEOUT_MS / 1000}s\n${output.trim()}`))
+    }, UPDATE_TIMEOUT_MS)
     child.stdout.setEncoding('utf8')
     child.stdout.on('data', (c: string) => { output += c })
     child.stderr.setEncoding('utf8')
     child.stderr.on('data', (c: string) => { output += c })
-    child.on('error', (error) => reject(new Error(`npm not available: ${error.message}`)))
+    child.on('error', (error) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      reject(new Error(`bundled pnpm unavailable: ${error.message}`))
+    })
     child.on('close', (code) => {
-      if (code !== 0) reject(new Error(`npm install exited ${code}\n${output.trim()}`))
-      else {
-        const version = bundledVersion(ctx)
-        if (version !== undefined) {
-          try { writeFileSync(join(ctx.harnessRoot, 'VERSION'), `${version}\n`) } catch { /* non-fatal */ }
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      if (code !== 0) {
+        reject(new Error(`pnpm update exited ${code}\n${output.trim()}`))
+        return
+      }
+      try {
+        const stagedManifest = join(stagingRoot, 'node_modules', '@deepseek-ai', 'dsh', 'package.json')
+        const version = JSON.parse(readFileSync(stagedManifest, 'utf8')).version as string | undefined
+        if (version === undefined) throw new Error('updated harness package has no version')
+        const currentModules = join(ctx.harnessRoot, 'node_modules')
+        const backupModules = join(ctx.harnessRoot, '.node_modules.backup')
+        if (existsSync(backupModules)) rmSync(backupModules, { recursive: true, force: true })
+        renameSync(currentModules, backupModules)
+        try {
+          renameSync(stagingModules, currentModules)
+          writeFileSync(join(ctx.harnessRoot, 'VERSION'), `${version}\n`)
+          rmSync(backupModules, { recursive: true, force: true })
+        } catch (error) {
+          if (existsSync(currentModules)) rmSync(currentModules, { recursive: true, force: true })
+          if (!existsSync(currentModules) && existsSync(backupModules)) renameSync(backupModules, currentModules)
+          throw error
         }
-        resolve(version ?? 'unknown')
+        resolve(version)
+      } catch (error) {
+        reject(new Error(`failed to activate harness update: ${errMsg(error)}\n${output.trim()}`))
+      } finally {
+        rmSync(stagingRoot, { recursive: true, force: true })
       }
     })
   })
 }
 
-/** Apply the update (already confirmed) and restart the harness child. */
+/** Apply the update (already confirmed), restarting the harness around replacement. */
 export async function applyUpdate(ctx: UpdaterContext): Promise<string> {
-  const version = await runNpmUpdate(ctx)
-  await ctx.restart()
-  return version
+  if (updateInProgress) throw new Error('已有更新正在进行')
+  updateInProgress = true
+  let stopped = false
+  try {
+    await ctx.stop()
+    stopped = true
+    return await runBundledPnpmUpdate(ctx)
+  } finally {
+    updateInProgress = false
+    if (stopped) await ctx.restart()
+  }
 }
 
 /** Check, then prompt via a native dialog; on confirm apply + restart (harness) or open the download page (shell). */
-export async function checkAndPrompt(ctx: UpdaterContext, window: BaseWindow | undefined): Promise<void> {
+export async function checkAndPrompt(
+  ctx: UpdaterContext,
+  window: BaseWindow | undefined,
+  target: 'all' | 'harness' = 'all',
+): Promise<void> {
+  const targetWindow = window && !window.isDestroyed() ? window : ctx.getWindow?.()
+  if (targetWindow && !targetWindow.isDestroyed()) {
+    if (targetWindow.isMinimized()) targetWindow.restore()
+    targetWindow.focus()
+  }
   const show = (options: Electron.MessageBoxOptions): Promise<Electron.MessageBoxReturnValue> =>
-    window && !window.isDestroyed() ? dialog.showMessageBox(window, options) : dialog.showMessageBox(options)
+    targetWindow && !targetWindow.isDestroyed() ? dialog.showMessageBox(targetWindow, options) : dialog.showMessageBox(options)
 
-  // Check shell (GitHub) and harness (npm) independently — one network failure
-  // shouldn't hide the other's result.
+  // A notification already identifies its update target. Avoid checking the
+  // unrelated shell again, which could otherwise consume the harness action.
   const [shellRes, harnessRes] = await Promise.allSettled([
-    checkForShellUpdate(ctx),
+    target === 'harness' ? Promise.resolve(undefined) : checkForShellUpdate(ctx),
     checkForUpdate(ctx),
   ])
   const shellStatus = shellRes.status === 'fulfilled' ? shellRes.value : undefined
@@ -234,10 +310,14 @@ export async function checkAndPrompt(ctx: UpdaterContext, window: BaseWindow | u
       type: 'info',
       title: '发现新版本',
       message: `harness 有新版本可用：${harnessStatus.latest}`,
-      detail: `当前 ${harnessStatus.current ?? '未安装'} → 最新 ${harnessStatus.latest}\n（外壳 v${ctx.shellVersion}）`,
+      detail: `当前 ${harnessStatus.current ?? '未安装'} → 最新 ${harnessStatus.latest}\n（外壳 v${ctx.shellVersion}）${updateInProgress ? '\n正在更新，请稍候。' : ''}`,
       buttons: ['更新', '稍后'],
       defaultId: 0,
       cancelId: 1,
+    }
+    if (updateInProgress) {
+      void show({ type: 'info', title: '更新', message: '已有更新正在进行，请稍候。' })
+      return
     }
     const choice = await show(options)
     if (choice.response !== 0) return
@@ -292,11 +372,15 @@ export async function checkAndPrompt(ctx: UpdaterContext, window: BaseWindow | u
 
 /** Background startup check: non-blocking, surfaces a system notification only. */
 export function backgroundCheck(ctx: UpdaterContext): void {
+  const activeNotifications = new Set<Notification>()
   const notify = (title: string, body: string, onClick: () => void): void => {
     if (Notification.isSupported()) {
-      const n = new Notification({ title, body })
-      n.on('click', onClick)
-      n.show()
+      const notification = new Notification({ title, body })
+      activeNotifications.add(notification)
+      const cleanup = (): void => { activeNotifications.delete(notification) }
+      notification.on('click', onClick)
+      notification.on('close', cleanup)
+      notification.show()
     } else {
       console.log(`[updater] ${title}: ${body}`)
     }
@@ -315,7 +399,7 @@ export function backgroundCheck(ctx: UpdaterContext): void {
     .then((status) => {
       if (!status.hasUpdate) return
       notify('harness 有新版本', `${status.current ?? '?'} → ${status.latest}`, () => {
-        void checkAndPrompt(ctx, undefined)
+        void checkAndPrompt(ctx, ctx.getWindow?.(), 'harness')
       })
     })
     .catch((error) => console.log(`[updater] background check failed: ${errMsg(error)}`))

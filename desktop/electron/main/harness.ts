@@ -81,7 +81,7 @@ export class HarnessManager extends EventEmitter {
     // native `node-addon-require-builtin` addon — the base bundle always mounts
     // the HMR plugin, whose service throws without it. Electron-as-Node honours
     // the flag (verified), so no native build is needed.
-    const child = spawn(process.execPath, ['--expose-internals', this.paths.binPath, 'web', '--port', '0', '--host', '127.0.0.1'], {
+    const child = spawn(process.execPath, ['--expose-internals', this.paths.binPath, 'web', '--no-open', '--port', '0', '--host', '127.0.0.1'], {
       env: {
         ...process.env,
         ELECTRON_RUN_AS_NODE: '1',

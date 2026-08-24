@@ -23,13 +23,16 @@ const NM = join(ROOT, 'resources', 'harness', 'node_modules')
 
 // Compile-time-only extensions. `.ts` also matches `.d.ts` (extension is `.ts`).
 const TS_EXT = new Set(['.ts', '.tsx', '.mts', '.cts', '.map'])
+const DEV_DIRS = new Set(['.github', '.nyc_output', '.pytest_cache', '__tests__', 'coverage', 'docs', 'examples', 'test', 'tests'])
 
 let removedFiles = 0
 let removedBytes = 0
 
 function sizeOf(p) {
   try {
-    return statSync(p).size
+    const stat = statSync(p)
+    if (!stat.isDirectory()) return stat.size
+    return readdirSync(p).reduce((total, name) => total + sizeOf(join(p, name)), 0)
   } catch {
     return 0
   }
@@ -60,7 +63,8 @@ function walk(dir) {
   for (const entry of entries) {
     const p = join(dir, entry.name)
     if (entry.isDirectory()) {
-      walk(p)
+      if (DEV_DIRS.has(entry.name)) rm(p)
+      else walk(p)
     } else if (TS_EXT.has(extnameLower(entry.name))) {
       rm(p)
     }
