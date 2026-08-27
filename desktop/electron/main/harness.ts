@@ -218,6 +218,11 @@ export class HarnessManager extends EventEmitter {
 
   private scheduleRestart(): void {
     if (this.stopping) return
+    // Clear any pending restart timer to avoid multiple concurrent restarts
+    if (this.restartTimer !== undefined) {
+      clearTimeout(this.restartTimer)
+      this.restartTimer = undefined
+    }
     const delay = this.restartDelayMs
     this.restartDelayMs = Math.min(this.restartDelayMs * 2, 30_000)
     this.emit('log', 'stderr', `harness will restart in ${Math.round(delay / 1000)}s`)

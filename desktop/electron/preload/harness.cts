@@ -156,10 +156,114 @@ function showSafeModeBanner(): void {
 onReady(() => {
   injectUploadButton()
   interceptDrops()
+
+  // Listen for refresh confirmation request from titlebar
+  ipcRenderer.on('harness:confirmRefresh', () => {
+    console.log('[harness preload] received harness:confirmRefresh')
+    showRefreshConfirmDialog()
+  })
+  console.log('[harness preload] registered harness:confirmRefresh listener')
+
   // Ask the shell whether this session is in safe mode; when it is, draw the
   // footer hint. Querying on load avoids any IPC race with the banner state.
-  void (window as unknown as { dshHarness: { getSafeMode: () => Promise<boolean> } })
-    .dshHarness.getSafeMode().then((active) => {
+  const global = window as unknown as { dshHarness?: { getSafeMode: () => Promise<boolean> } }
+  if (global.dshHarness?.getSafeMode) {
+    void global.dshHarness.getSafeMode().then((active) => {
       if (active) showSafeModeBanner()
     })
+  }
 })
+
+/** Show a custom in-app refresh confirmation dialog */
+function showRefreshConfirmDialog(): void {
+  console.log('[harness preload] showRefreshConfirmDialog called')
+  const existing = document.getElementById('dsh-refresh-confirm')
+  if (existing !== null) {
+    console.log('[harness preload] dialog already exists, skipping')
+    return // Already showing
+  }
+  console.log('[harness preload] creating dialog')
+
+  const overlay = document.createElement('div')
+  overlay.id = 'dsh-refresh-confirm'
+  overlay.style.cssText = [
+    'position:fixed', 'inset:0', 'z-index:2147483647',
+    'background:rgba(0,0,0,0.6)', 'backdrop-filter:blur(4px)',
+    'display:flex', 'align-items:center', 'justify-content:center',
+    'animation:dsh-fade-in 0.15s ease-out',
+  ].join(';')
+
+  const dialog = document.createElement('div')
+  dialog.style.cssText = [
+    'background:#2b2d31', 'border:1px solid #45484f', 'border-radius:8px',
+    'box-shadow:0 8px 24px rgba(0,0,0,0.5)', 'width:360px', 'padding:20px',
+    'color:#e8eaed', 'font:14px/1.5 system-ui, sans-serif',
+    'animation:dsh-scale-in 0.2s ease-out',
+  ].join(';')
+
+  const title = document.createElement('div')
+  title.textContent = '刷新页面'
+  title.style.cssText = 'font-size:16px;font-weight:600;margin-bottom:12px;color:#fff'
+
+  const message = document.createElement('div')
+  message.textContent = '确定要刷新页面吗？未提交的内容可能会丢失。'
+  message.style.cssText = 'margin-bottom:20px;color:#c8cbd1;line-height:1.5'
+
+  const actions = document.createElement('div')
+  actions.style.cssText = 'display:flex;justify-content:flex-end;gap:8px'
+
+  const cancelBtn = document.createElement('button')
+  cancelBtn.textContent = '取消'
+  cancelBtn.style.cssText = [
+    'padding:8px 16px', 'border:1px solid #555a63', 'border-radius:6px',
+    'background:#363940', 'color:#e8eaed', 'cursor:pointer',
+    'font:inherit', 'transition:background 0.15s',
+  ].join(';')
+  cancelBtn.addEventListener('mouseenter', () => { cancelBtn.style.background = '#454951' })
+  cancelBtn.addEventListener('mouseleave', () => { cancelBtn.style.background = '#363940' })
+  cancelBtn.addEventListener('click', () => overlay.remove())
+
+  const confirmBtn = document.createElement('button')
+  confirmBtn.textContent = '刷新'
+  confirmBtn.style.cssText = [
+    'padding:8px 16px', 'border:1px solid #5b8def', 'border-radius:6px',
+    'background:#4472c4', 'color:#fff', 'cursor:pointer',
+    'font:inherit', 'font-weight:500', 'transition:background 0.15s',
+  ].join(';')
+  confirmBtn.addEventListener('mouseenter', () => { confirmBtn.style.background = '#5283d8' })
+  confirmBtn.addEventListener('mouseleave', () => { confirmBtn.style.background = '#4472c4' })
+  confirmBtn.addEventListener('click', () => {
+    overlay.remove()
+    location.reload()
+  })
+
+  actions.append(cancelBtn, confirmBtn)
+  dialog.append(title, message, actions)
+  overlay.appendChild(dialog)
+
+  // Close on escape or overlay click
+  const closeOnEscape = (e: KeyboardEvent): void => {
+    if (e.key === 'Escape') {
+      overlay.remove()
+      document.removeEventListener('keydown', closeOnEscape)
+    }
+  }
+  document.addEventListener('keydown', closeOnEscape)
+  overlay.addEventListener('click', (e) => {
+    if (e.target === overlay) overlay.remove()
+  })
+
+  // Inject animations
+  if (!document.getElementById('dsh-refresh-animations')) {
+    const style = document.createElement('style')
+    style.id = 'dsh-refresh-animations'
+    style.textContent = [
+      '@keyframes dsh-fade-in { from { opacity: 0; } to { opacity: 1; } }',
+      '@keyframes dsh-scale-in { from { transform: scale(0.95); opacity: 0; } to { transform: scale(1); opacity: 1; } }',
+    ].join('\n')
+    document.head.appendChild(style)
+  }
+
+  document.body.appendChild(overlay)
+  confirmBtn.focus()
+}

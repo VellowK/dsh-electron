@@ -12,6 +12,8 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { pathToFileURL } from 'node:url'
+
 const ROOT = dirname(fileURLToPath(new URL('.', import.meta.url)))
 const HARNESS_DIR = join(ROOT, 'resources', 'harness')
 
@@ -83,6 +85,6 @@ export function ensureHarness(pinned = DEFAULT_DSH_VERSION) {
 }
 
 // CLI entry: `node scripts/prepare-harness.mjs [version]`
-if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).href) {
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   ensureHarness(process.argv[2] ?? DEFAULT_DSH_VERSION)
 }

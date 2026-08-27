@@ -196,9 +196,16 @@ function runBundledPnpmUpdate(ctx: UpdaterContext): Promise<string> {
     })
     let output = ''
     let settled = false
+    const cleanup = (): void => {
+      if (timer !== undefined) clearTimeout(timer)
+      child.stdout.removeAllListeners()
+      child.stderr.removeAllListeners()
+      child.removeAllListeners()
+    }
     const timer = setTimeout(() => {
       if (settled) return
       settled = true
+      cleanup()
       child.kill()
       reject(new Error(`pnpm update timed out after ${UPDATE_TIMEOUT_MS / 1000}s\n${output.trim()}`))
     }, UPDATE_TIMEOUT_MS)
@@ -209,13 +216,13 @@ function runBundledPnpmUpdate(ctx: UpdaterContext): Promise<string> {
     child.on('error', (error) => {
       if (settled) return
       settled = true
-      clearTimeout(timer)
+      cleanup()
       reject(new Error(`bundled pnpm unavailable: ${error.message}`))
     })
     child.on('close', (code) => {
       if (settled) return
       settled = true
-      clearTimeout(timer)
+      cleanup()
       if (code !== 0) {
         reject(new Error(`pnpm update exited ${code}\n${output.trim()}`))
         return

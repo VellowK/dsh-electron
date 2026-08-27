@@ -150,11 +150,10 @@ function buildMenu(): void {
       label: '视图',
       submenu: [
         {
-          label: '强制重新加载',
+          label: '重启应用',
           click: () => {
-            if (harnessView && !harnessView.webContents.isDestroyed()) {
-              harnessView.webContents.reloadIgnoringCache()
-            }
+            app.relaunch()
+            app.quit()
           },
         },
         { role: 'toggleDevTools', label: '开发者工具', visible: IS_DEV },
@@ -303,7 +302,14 @@ function wireHarness(): void {
     appMenu.popup({ window: mainWindow, x: Math.round(pos?.x ?? 0), y: Math.round(pos?.y ?? TITLEBAR_HEIGHT) })
   })
   ipcMain.on('titlebar:refresh', () => {
-    if (harnessView && !harnessView.webContents.isDestroyed()) harnessView.webContents.reload()
+    // Send to harness view to show custom confirmation dialog
+    console.log('[shell] titlebar:refresh received, sending to harness view')
+    if (harnessView && !harnessView.webContents.isDestroyed()) {
+      console.log('[shell] sending harness:confirmRefresh to harness view')
+      harnessView.webContents.send('harness:confirmRefresh')
+    } else {
+      console.log('[shell] harness view not available')
+    }
   })
   ipcMain.on('titlebar:minimize', () => {
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.minimize()
@@ -313,6 +319,11 @@ function wireHarness(): void {
   })
   ipcMain.on('titlebar:close', () => {
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.close()
+  })
+  ipcMain.on('titlebar:getFullscreenState', (event) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      event.sender.send('titlebar:fullscreen', mainWindow.isFullScreen())
+    }
   })
 
   registerFileUpload({
