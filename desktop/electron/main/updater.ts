@@ -178,10 +178,16 @@ function runBundledPnpmUpdate(ctx: UpdaterContext): Promise<string> {
       dshmarket: '1.10.0',
       pnpm: PNPM_VERSION,
     },
-    allowScripts: {
-      'koffi@3.1.5': true,
-      'node-pty@1.2.0-beta.15': true,
-      '@deepseek-ai/dsh-subprocess-local@0.1.0-rc.7': true,
+    pnpm: {
+      onlyBuiltDependencies: [
+        'koffi',
+        'node-pty',
+        '@deepseek-ai/dsh-subprocess-local',
+      ],
+      ignoredBuiltDependencies: [
+        '@google/genai',
+        'protobufjs',
+      ],
     },
   }, null, 2) + '\n')
 
