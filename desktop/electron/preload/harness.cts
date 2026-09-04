@@ -48,7 +48,37 @@ contextBridge.exposeInMainWorld('dshUpload', {
   uploadPaths: (paths: string[]): Promise<UploadResult> => ipcRenderer.invoke('files:upload', paths),
 })
 
-// ---- DOM shell: floating upload button + drag/drop interception ----
+type UpdateProgress = { phase: string; percent: number; message: string }
+
+function showUpdateProgress(progress: UpdateProgress): void {
+  let bar = document.getElementById('dsh-update-progress')
+  if (bar === null) {
+    bar = document.createElement('div')
+    bar.id = 'dsh-update-progress'
+    bar.style.cssText = 'position:fixed;left:0;right:0;bottom:0;z-index:2147483647;height:34px;background:rgba(25,25,28,.96);color:#eee;font:13px/34px system-ui,sans-serif;padding:0 18px;box-sizing:border-box;box-shadow:0 -2px 12px rgba(0,0,0,.35)'
+    const track = document.createElement('div')
+    track.style.cssText = 'position:absolute;left:0;right:0;top:0;height:3px;background:#3a3d45'
+    const fill = document.createElement('div')
+    fill.id = 'dsh-update-progress-fill'
+    fill.style.cssText = 'height:100%;width:0;background:#5b8def;transition:width .2s ease'
+    track.appendChild(fill)
+    bar.appendChild(track)
+    const label = document.createElement('span')
+    label.id = 'dsh-update-progress-label'
+    bar.appendChild(label)
+    document.body.appendChild(bar)
+  }
+  const fill = document.getElementById('dsh-update-progress-fill')
+  if (fill !== null) fill.style.width = `${Math.max(0, Math.min(100, progress.percent))}%`
+  const label = document.getElementById('dsh-update-progress-label')
+  if (label !== null) label.textContent = progress.message
+  if (progress.phase === 'complete' || progress.phase === 'failed') {
+    setTimeout(() => bar?.remove(), 1200)
+  }
+}
+
+ipcRenderer.on('harness:update-progress', (_event, progress: UpdateProgress) => showUpdateProgress(progress))
+
 
 const isImage = (file: File): boolean => file.type.startsWith('image/')
 const hasNonImage = (files: FileList): boolean => {

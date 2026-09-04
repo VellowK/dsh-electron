@@ -13,6 +13,12 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, w
 import { join } from 'node:path'
 import type { Readable } from 'node:stream'
 
+export interface UpdateProgress {
+  phase: 'preparing' | 'resolving' | 'downloading' | 'installing' | 'activating' | 'complete' | 'failed'
+  percent: number
+  message: string
+}
+
 export interface UpdaterContext {
   /** Root of the harness runtime install (`.../harness`). */
   harnessRoot: string
@@ -20,6 +26,12 @@ export interface UpdaterContext {
   shellVersion: string
   /** Return the current main window so notifications can focus it. */
   getWindow?: () => BaseWindow | undefined
+  /** npm registry used for Harness checks and installs. */
+  registryUrl?: string
+  /** Persist a changed npm registry source. */
+  setRegistryUrl?: (url: string) => void
+  /** Publish best-effort installation progress to the renderer. */
+  onProgress?: (progress: UpdateProgress) => void
   /** Stop the harness before replacing its runtime files. */
   stop: () => Promise<void>
   /** Restart the harness child after an update; resolves to the new URL. */
@@ -49,8 +61,8 @@ function githubApiBase(): string {
   return (process.env.DSH_GITHUB_API ?? 'https://api.github.com').replace(/\/+$/, '')
 }
 
-function registryBase(): string {
-  return (process.env.DSH_NPM_REGISTRY ?? 'https://registry.npmjs.org').replace(/\/+$/, '')
+function registryBase(configured?: string): string {
+  return (configured ?? process.env.DSH_NPM_REGISTRY ?? 'https://registry.npmjs.org').replace(/\/+$/, '')
 }
 
 /** Bundled harness version: VERSION file first, else the installed package.json. */
@@ -71,8 +83,8 @@ function bundledVersion(ctx: UpdaterContext): string | undefined {
   return undefined
 }
 
-async function fetchLatest(): Promise<string> {
-  const url = `${registryBase()}/@deepseek-ai%2Fdsh/latest`
+async function fetchLatest(registry?: string): Promise<string> {
+  const url = `${registryBase(registry)}/@deepseek-ai%2Fdsh/latest`
   const response = await fetch(url)
   if (!response.ok) throw new Error(`registry HTTP ${response.status}`)
   const data = (await response.json()) as { version?: string }
@@ -154,7 +166,7 @@ export async function checkForShellUpdate(ctx: UpdaterContext): Promise<ShellUpd
 /** Fetch latest, compare against bundled, and report. Never prompts. */
 export async function checkForUpdate(ctx: UpdaterContext): Promise<UpdateStatus> {
   const current = bundledVersion(ctx)
-  const latest = await fetchLatest()
+  const latest = await fetchLatest(ctx.registryUrl)
   const hasUpdate = current === undefined ? true : compareVersions(latest, current) > 0
   return { current, latest, hasUpdate }
 }
@@ -170,6 +182,7 @@ function runBundledPnpmUpdate(ctx: UpdaterContext): Promise<string> {
   const stagingRoot = mkdtempSync(join(ctx.harnessRoot, '.update-'))
   const stagingModules = join(stagingRoot, 'node_modules')
   mkdirSync(stagingModules, { recursive: true })
+  ctx.onProgress?.({ phase: 'preparing', percent: 0, message: '准备更新环境…' })
   writeFileSync(join(stagingRoot, 'package.json'), JSON.stringify({
     name: 'dsh-harness-runtime',
     private: true,
@@ -178,22 +191,20 @@ function runBundledPnpmUpdate(ctx: UpdaterContext): Promise<string> {
       dshmarket: '1.10.0',
       pnpm: PNPM_VERSION,
     },
-    pnpm: {
-      onlyBuiltDependencies: [
-        'koffi',
-        'node-pty',
-        '@deepseek-ai/dsh-subprocess-local',
-      ],
-      ignoredBuiltDependencies: [
-        '@google/genai',
-        'protobufjs',
-      ],
-    },
   }, null, 2) + '\n')
+  writeFileSync(join(stagingRoot, 'pnpm-workspace.yaml'), [
+    'allowBuilds:',
+    '  koffi: true',
+    '  node-pty: true',
+    '  "@deepseek-ai/dsh-subprocess-local": true',
+    '  @google/genai: false',
+    '  protobufjs: false',
+    '',
+  ].join('\n'))
 
   return new Promise((resolve, reject) => {
     const args = [packageManager, 'install', '--no-lockfile']
-    if (process.env.DSH_NPM_REGISTRY) args.push('--registry', process.env.DSH_NPM_REGISTRY)
+    if (ctx.registryUrl) args.push('--registry', ctx.registryUrl)
     const child: ChildProcessByStdio<null, Readable, Readable> = spawn(process.execPath, args, {
       cwd: stagingRoot,
       env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
@@ -208,6 +219,20 @@ function runBundledPnpmUpdate(ctx: UpdaterContext): Promise<string> {
       child.stderr.removeAllListeners()
       child.removeAllListeners()
     }
+    const reportProgress = (chunk: string): void => {
+      const match = /Progress: resolved (\d+), reused (\d+), downloaded (\d+), added (\d+)/.exec(chunk)
+      if (match === null) return
+      const resolved = Number(match[1])
+      const downloaded = Number(match[3])
+      const added = Number(match[4])
+      const phase = added > 0 ? 'installing' : downloaded > 0 ? 'downloading' : 'resolving'
+      const percent = phase === 'resolving'
+        ? Math.min(35, Math.max(5, Math.round(resolved / 2)))
+        : phase === 'downloading'
+          ? Math.min(70, 35 + Math.round(Math.min(35, downloaded / 2)))
+          : Math.min(90, 70 + Math.round(Math.min(20, added / 25)))
+      ctx.onProgress?.({ phase, percent, message: phase === 'resolving' ? `解析依赖（${resolved}）…` : phase === 'downloading' ? `下载依赖（${downloaded}）…` : `安装依赖（${added}）…` })
+    }
     const timer = setTimeout(() => {
       if (settled) return
       settled = true
@@ -216,9 +241,15 @@ function runBundledPnpmUpdate(ctx: UpdaterContext): Promise<string> {
       reject(new Error(`pnpm update timed out after ${UPDATE_TIMEOUT_MS / 1000}s\n${output.trim()}`))
     }, UPDATE_TIMEOUT_MS)
     child.stdout.setEncoding('utf8')
-    child.stdout.on('data', (c: string) => { output += c })
+    child.stdout.on('data', (c: string) => {
+      output += c
+      reportProgress(output)
+    })
     child.stderr.setEncoding('utf8')
-    child.stderr.on('data', (c: string) => { output += c })
+    child.stderr.on('data', (c: string) => {
+      output += c
+      reportProgress(output)
+    })
     child.on('error', (error) => {
       if (settled) return
       settled = true
@@ -230,6 +261,7 @@ function runBundledPnpmUpdate(ctx: UpdaterContext): Promise<string> {
       settled = true
       cleanup()
       if (code !== 0) {
+        ctx.onProgress?.({ phase: 'failed', percent: 0, message: '依赖安装失败' })
         reject(new Error(`pnpm update exited ${code}\n${output.trim()}`))
         return
       }
@@ -264,11 +296,17 @@ function runBundledPnpmUpdate(ctx: UpdaterContext): Promise<string> {
 export async function applyUpdate(ctx: UpdaterContext): Promise<string> {
   if (updateInProgress) throw new Error('已有更新正在进行')
   updateInProgress = true
+  ctx.onProgress?.({ phase: 'preparing', percent: 0, message: '准备停止 Harness…' })
   let stopped = false
   try {
     await ctx.stop()
     stopped = true
-    return await runBundledPnpmUpdate(ctx)
+    const version = await runBundledPnpmUpdate(ctx)
+    ctx.onProgress?.({ phase: 'complete', percent: 100, message: `已更新到 Harness ${version}` })
+    return version
+  } catch (error) {
+    ctx.onProgress?.({ phase: 'failed', percent: 0, message: `更新失败：${errMsg(error)}` })
+    throw error
   } finally {
     updateInProgress = false
     if (stopped) await ctx.restart()

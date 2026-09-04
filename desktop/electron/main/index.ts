@@ -4,7 +4,7 @@
  */
 
 import { app, BaseWindow, dialog, Menu, shell, ipcMain, WebContentsView } from 'electron'
-import { mkdirSync } from 'node:fs'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { HarnessManager, type HarnessPaths } from './harness.js'
 import { registerFileUpload } from './files.js'
@@ -37,6 +37,26 @@ let titlebarView: WebContentsView | undefined
 let appMenu: Menu | undefined
 let manager: HarnessManager | undefined
 let updater: UpdaterContext | undefined
+const OFFICIAL_REGISTRY = 'https://registry.npmjs.org'
+const TAOBAO_REGISTRY = 'https://registry.npmmirror.com'
+
+function updateSourcePath(): string {
+  return join(app.getPath('userData'), 'update-source.json')
+}
+
+function loadUpdateSource(): string {
+  try {
+    const value = JSON.parse(readFileSync(updateSourcePath(), 'utf8')) as { registryUrl?: unknown }
+    if (typeof value.registryUrl === 'string' && value.registryUrl.trim() !== '') return value.registryUrl.trim()
+  } catch {
+    // Missing or malformed local settings use the official registry.
+  }
+  return process.env.DSH_NPM_REGISTRY ?? OFFICIAL_REGISTRY
+}
+
+function saveUpdateSource(url: string): void {
+  writeFileSync(updateSourcePath(), JSON.stringify({ registryUrl: url }, null, 2) + '\n')
+}
 
 /** Whether the current session is running in safe mode (only shipped plugins). */
 let safeMode = false
@@ -144,6 +164,22 @@ function createWindow(): void {
   })
 }
 
+function openUpdateSourceSettings(): void {
+  if (!updater) return
+  const options: Electron.MessageBoxOptions = {
+    type: 'question', title: '更新源设置', message: '选择 Harness 更新源',
+    detail: `当前：${updater.registryUrl ?? OFFICIAL_REGISTRY}\n官方源稳定但可能较慢；淘宝源通常在国内网络更快。自定义源可通过 DSH_NPM_REGISTRY 环境变量设置。`,
+    buttons: ['官方源', '淘宝源', '取消'], cancelId: 2,
+  }
+  const prompt = mainWindow && !mainWindow.isDestroyed()
+    ? dialog.showMessageBox(mainWindow, options)
+    : dialog.showMessageBox(options)
+  void prompt.then(({ response }) => {
+    const url = response === 0 ? OFFICIAL_REGISTRY : response === 1 ? TAOBAO_REGISTRY : undefined
+    if (url !== undefined) updater?.setRegistryUrl?.(url)
+  })
+}
+
 function buildMenu(): void {
   const menu = Menu.buildFromTemplate([
     {
@@ -173,7 +209,11 @@ function buildMenu(): void {
           click: () => openMarket(),
         },
         {
-          label: '重启服务',
+          label: '更新源设置',
+           click: () => openUpdateSourceSettings(),
+         },
+         {
+           label: '重启服务',
           click: () => {
             if (manager) void manager.restart().catch((error) => {
               console.error('[shell] restart failed:', error)
@@ -335,6 +375,17 @@ function wireHarness(): void {
     harnessRoot: paths.harnessRoot,
     shellVersion: app.getVersion(),
     getWindow: () => mainWindow,
+    registryUrl: loadUpdateSource(),
+    setRegistryUrl: (url) => {
+      const normalized = url.replace(/\/+$/, '')
+      updater!.registryUrl = normalized
+      saveUpdateSource(normalized)
+    },
+    onProgress: (progress) => {
+      if (harnessView && !harnessView.webContents.isDestroyed()) {
+        harnessView.webContents.send('harness:update-progress', progress)
+      }
+    },
     stop: () => manager?.stop() ?? Promise.reject(new Error('harness manager not ready')),
     restart: () => manager?.start() ?? Promise.reject(new Error('harness manager not ready')),
   }

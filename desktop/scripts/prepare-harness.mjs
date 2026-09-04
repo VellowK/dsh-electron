@@ -62,9 +62,19 @@ function installedMarketVersion() {
 export function ensureHarness(pinned = DEFAULT_DSH_VERSION) {
   mkdirSync(HARNESS_DIR, { recursive: true })
   const manifestPath = join(HARNESS_DIR, 'package.json')
+  const workspaceConfigPath = join(HARNESS_DIR, 'pnpm-workspace.yaml')
   if (!existsSync(manifestPath)) {
     writeFileSync(manifestPath, JSON.stringify({ name: 'dsh-harness-runtime', private: true }, null, 2) + '\n')
   }
+  writeFileSync(workspaceConfigPath, [
+    'allowBuilds:',
+    '  koffi: true',
+    '  node-pty: true',
+    '  "@deepseek-ai/dsh-subprocess-local": true',
+    '  @google/genai: false',
+    '  protobufjs: false',
+    '',
+  ].join('\n'))
 
   const pinnedName = pinned.replace(/^.*@/, '') // strip scope marker, keep package@ver
   const want = pinnedName // e.g. 0.1.0-rc.6
