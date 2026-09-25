@@ -1,3 +1,6 @@
+## 该项目已废弃，类似项目推荐 https://github.com/dsh-tauri/deepseek-harness-desktop
+## This repository has been abandoned, recommending https://github.com/dsh-tauri/deepseek-harness-desktop as a replacement.
+
 # DeepSeek Harness
 
 English | [中文](README.zh.md)
